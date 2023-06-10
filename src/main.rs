@@ -109,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
         description = args.description,
         language = args.language
     );
+
     println!("Sending prompt: {}", prompt);
 
     let client = Client::new();
@@ -132,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
                 .build()?,
         ])
         .build()?;
+
     println!("Sending prompt to OpenAI, please wait... 🤖");
     let res = client.chat().create(req).await?;
     println!("Got a response ✅ Attempting to decode the contents...");
@@ -147,54 +149,52 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Generating the project files... 🤖");
 
-    // Create a folder with the project name
     let project_name = args.name;
     let project_path = format!("./{}", project_name);
     println!("Creating project folder `{}`", project_path);
     fs::create_dir_all(&project_path)?;
 
-    // Create a dockerfile
-    let dockerfile_path = format!("{}/Dockerfile", project_path);
-    println!("Creating dockerfile `{}`", dockerfile_path);
-    let dockerfile_contents = contents.dockerfile;
-    fs::write(&dockerfile_path, dockerfile_contents)?;
+    let create_file = |file_path: &str, file_contents: &str| -> anyhow::Result<()> {
+        println!("Creating file `{}`", file_path);
+        fs::write(file_path, file_contents)?;
+        Ok(())
+    };
 
-    // Create a makefile
-    let makefile_path = format!("{}/Makefile", project_path);
-    println!("Creating makefile `{}`", makefile_path);
-    let makefile_contents = contents.makefile;
-    fs::write(&makefile_path, makefile_contents)?;
+    let create_source_files =
+        |source_files_path: &str, source_files: Vec<SourceFile>| -> anyhow::Result<()> {
+            println!("Creating source files folder `{}`", source_files_path);
 
-    // Create a readme
-    let readme_path = format!("{}/README.md", project_path);
-    println!("Creating readme `{}`", readme_path);
-    let readme_contents = contents.readme;
-    fs::write(&readme_path, readme_contents)?;
+            for source_file in source_files {
+                if source_file.name.to_lowercase().contains("makefile")
+                    || source_file.name.to_lowercase().contains("dockerfile")
+                    || source_file.name.to_lowercase().contains("readme")
+                {
+                    println!(
+                        "Skipping source file `{}` because it was already created",
+                        source_file.name
+                    );
+                    continue;
+                }
 
-    // Create source files
-    let source_files_path = &project_path;
-    println!("Creating source files folder `{}`", source_files_path);
-    // iterate through the source files and create them
-    for source_file in contents.source_files {
-        if source_file.name.to_lowercase().contains("makefile")
-            || source_file.name.to_lowercase().contains("dockerfile")
-            || source_file.name.to_lowercase().contains("readme")
-        {
-            println!(
-                "Skipping source file `{}` because it was already created",
-                source_file.name
-            );
-            continue;
-        }
-        let source_file_path = format!("{}/{}", source_files_path, source_file.name);
-        let parent = Path::new(&source_file_path).parent().unwrap();
-        if !parent.exists() {
-            fs::create_dir_all(parent)?;
-        }
-        let source_file_contents = source_file.contents;
-        fs::write(&source_file_path, source_file_contents)?;
-        println!("Created source file `{}`", source_file_path);
-    }
+                let source_file_path = format!("{}/{}", source_files_path, source_file.name);
+                let parent = Path::new(&source_file_path).parent().unwrap();
+                fs::create_dir_all(parent)?;
+
+                create_file(&source_file_path, &source_file.contents)?;
+                println!("Created source file `{}`", source_file_path);
+            }
+
+            Ok(())
+        };
+
+    // Actually create the files.
+    create_file(
+        &format!("{}/Dockerfile", project_path),
+        &contents.dockerfile,
+    )?;
+    create_file(&format!("{}/Makefile", project_path), &contents.makefile)?;
+    create_file(&format!("{}/README.md", project_path), &contents.readme)?;
+    create_source_files(&project_path, contents.source_files)?;
 
     println!("Project files generated successfully ✅\n");
     println!("{}\n", contents.joke);
@@ -203,7 +203,6 @@ async fn main() -> anyhow::Result<()> {
     println!("cd {}", project_name);
     println!("make build");
     println!("make run");
-    // print disclaimer about the project
 
     Ok(())
 }
