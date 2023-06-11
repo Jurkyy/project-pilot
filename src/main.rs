@@ -3,115 +3,61 @@ use async_openai::{
     Client,
 };
 use clap::Parser;
-use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    io::{self, Write},
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{env, fs};
 use tokio::main;
+
+mod utils;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Describe what the program should do, be as specific as possible
-    #[arg(short, long)]
+    // Describe what the program should do, be as specific as possible
+    #[arg(
+        short,
+        long,
+        default_value = "An app that writes 'hello world' to the terminal"
+    )]
     description: String,
 
-    /// The programming language to use
+    // The programming language to use
     #[arg(short, long, default_value = "javascript")]
     language: String,
 
-    /// The name of the project which will also be the name of the directory created
+    // The name of the project which will also be the name of the directory created
     #[arg(short, long, default_value = "myapp")]
     name: String,
 
-    /// The model to use, see https://platform.openai.com/docs/models for specific models
+    // The model to use, see https://platform.openai.com/docs/models for specific models
     #[arg(short, long, default_value = "gpt-3.5-turbo")]
     model: String,
 
-    /// Max allowed tokens
-    /// See https://beta.openai.com/docs/api-reference/completions/create#max_tokens
-    /// for more information
-    /// Default: 2048
+    // Max allowed tokens
+    // See https://beta.openai.com/docs/api-reference/completions/create#max_tokens
+    // for more information
+    // Default: 2048
     #[arg(short, long, default_value = "2048")]
     tokens: u16,
-}
 
-#[derive(Deserialize, Serialize)]
-struct OutputJson {
-    dockerfile: String,
-    makefile: String,
-    source_files: Vec<SourceFile>,
-    readme: String,
-    joke: String,
-}
-
-#[derive(Deserialize, Serialize)]
-struct SourceFile {
-    name: String,
-    contents: String,
+    // The path where to build the project.
+    #[arg(short, long, default_value = "./")]
+    path: String,
 }
 
 #[main]
 async fn main() -> anyhow::Result<()> {
+    // Check if the API key is set in the environment.
+    if env::var("OPENAI_API_KEY").is_err() {
+        eprintln!("OPENAI_API_KEY environment variable not set.\nExample:\nexport OPENAI_API_KEY=<your-api-key>");
+        return Ok(());
+    }
+
+    // Parse cmdline arguments and build prompt.
     let args = Args::parse();
-    let prompt = format!(
-        "Take the following programming language, application requirements, and produce a working application.
-
-        your solution must include:
-        1. Dockerfile that allows the application to be built and run
-        2. Makefile that contains the following commands assuming that the application is executed using the Dockerfile.
-            a. make build
-            b. make run (make sure that docker cleans up after itself)
-            c. make test (make sure that docker cleans up after itself)
-        3. Readme with instructions required to build and run the application
-        4. files with the source code for the application, make sure to not escape the control characters twice, like \\n because that will break the source code.
-        5. Make sure to always include a json property called \"joke\" with a joke about software developers.
-
-
-        The output must match the provided output json schema and be a valid json.
-
-        Project Name:
-        ---
-        {name}
-        ---
-
-        Programming Language:
-        ---
-        {language}
-        ---
-
-        Application Requirements:
-        ---
-        {description}
-        ---
-
-        Output Json schema:
-        {{
-            \"joke\": \"joke contents\",
-            \"dockerfile\": \"dockerfile contents\",
-            \"makefile\": \"makefile contents\",
-            \"readme\": \"readme contents\",
-            \"source_files\": [
-                {{
-                    \"name\": \"...\",
-                    \"contents\": \"...\"
-                }}
-            ]
-        }}
-
-        Make sure that you do not include invalid control characters in the output json or invalid characters (like double quotes or something else that can break the json).
-
-        Respond ONLY with the data portion of a valid Json object. No schema definition required. No other words.",
-        name = args.name,
-        description = args.description,
-        language = args.language
-    );
+    let prompt = utils::generate_prompt(&args.name, &args.description, &args.language);
 
     println!("Sending prompt: {}", prompt);
 
+    // Build the request to ChatGPT.
     let client = Client::new();
     let req = CreateChatCompletionRequestArgs::default()
         .max_tokens(args.tokens)
@@ -138,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
     let res = client.chat().create(req).await?;
     println!("Got a response ✅ Attempting to decode the contents...");
     println!("Response:\n{}", &res.choices[0].message.content);
-    let contents: OutputJson = serde_json::from_str(&res.choices[0].message.content)
+    let contents: utils::OutputJson = serde_json::from_str(&res.choices[0].message.content)
         .map_err(|e| {
             println!(
                 "Failed to decode the contents, please try again. Sometimes OpenAI returns invalid JSON."
@@ -150,54 +96,21 @@ async fn main() -> anyhow::Result<()> {
     println!("Generating the project files... 🤖");
 
     let project_name = args.name;
-    let project_path = format!("./{}", project_name);
+    let project_path = format!("{}/{}", args.path, project_name);
     println!("Creating project folder `{}`", project_path);
     fs::create_dir_all(&project_path)?;
 
-    let create_file = |file_path: &str, file_contents: &str| -> anyhow::Result<()> {
-        println!("Creating file `{}`", file_path);
-        fs::write(file_path, file_contents)?;
-        Ok(())
-    };
-
-    let create_source_files =
-        |source_files_path: &str, source_files: Vec<SourceFile>| -> anyhow::Result<()> {
-            println!("Creating source files folder `{}`", source_files_path);
-
-            for source_file in source_files {
-                if source_file.name.to_lowercase().contains("makefile")
-                    || source_file.name.to_lowercase().contains("dockerfile")
-                    || source_file.name.to_lowercase().contains("readme")
-                {
-                    println!(
-                        "Skipping source file `{}` because it was already created",
-                        source_file.name
-                    );
-                    continue;
-                }
-
-                let source_file_path = format!("{}/{}", source_files_path, source_file.name);
-                let parent = Path::new(&source_file_path).parent().unwrap();
-                fs::create_dir_all(parent)?;
-
-                create_file(&source_file_path, &source_file.contents)?;
-                println!("Created source file `{}`", source_file_path);
-            }
-
-            Ok(())
-        };
-
     // Actually create the files.
-    create_file(
+    utils::create_file(
         &format!("{}/Dockerfile", project_path),
         &contents.dockerfile,
     )?;
-    create_file(&format!("{}/Makefile", project_path), &contents.makefile)?;
-    create_file(&format!("{}/README.md", project_path), &contents.readme)?;
-    create_source_files(&project_path, contents.source_files)?;
+    utils::create_file(&format!("{}/Makefile", project_path), &contents.makefile)?;
+    utils::create_file(&format!("{}/README.md", project_path), &contents.readme)?;
+    utils::create_source_files(&project_path, contents.source_files)?;
 
+    // Explain how to use the generated project.
     println!("Project files generated successfully ✅\n");
-    println!("{}\n", contents.joke);
     println!("Disclaimer: This project was generated by a robot, please review the code before executing it.\n");
     println!("To execute the project, run the following commands:\n");
     println!("cd {}", project_name);
